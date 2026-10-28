@@ -76,3 +76,7 @@ linger/
 ```
 
 参数：`scribe_v2_realtime`，`language_code=en`，VAD 提交（静音 0.7 s）。音频以设备原生的 48 kHz 单声道 PCM16 发送，每块 100 ms。音频积压超过 500 ms 或单次发送超过 1 s 时，会丢弃旧音频并重新同步，避免越听越落后。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 BocchiJamSuki
