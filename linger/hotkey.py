@@ -1,4 +1,4 @@
-"""System-wide hotkey (works while Zoom has focus) via Win32 RegisterHotKey."""
+"""System-wide hotkey (works while another application has focus) via Win32 RegisterHotKey."""
 import sys
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QTimer
@@ -7,7 +7,7 @@ MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
 VK_OEM_3, VK_F8, VK_F9 = 0xC0, 0x77, 0x78
 WM_HOTKEY = 0x0312
 
-# Two keys at most, none of them used by Zoom (whose shortcuts are Alt+letter; Alt+Q leaves).
+# Two keys at most, avoiding common conferencing shortcuts (e.g. Zoom uses Alt+letter; Alt+Q ends a meeting).
 COMBOS = {
     'Ctrl+`': (MOD_CONTROL, VK_OEM_3),
     'Alt+`': (MOD_ALT, VK_OEM_3),

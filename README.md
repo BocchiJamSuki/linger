@@ -1,82 +1,151 @@
+<div align="center">
+
 # Linger
 
-**说过的话，会停留到你看懂为止。**
+**Real-time English captions for any audio playing on your computer — designed to stay still long enough to read, select, and copy.**
 
-面试用的英语实时字幕。录下电脑正在播放的声音（例如 Zoom 里教授的声音），用 ElevenLabs Scribe 实时转写成文字。哪句没听懂，可以马上选中复制，拿去翻译。
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6.svg)
+![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-3776AB.svg)
 
-![Linger 深色主题](docs/ui-dark.png)
+**English** · [简体中文](README.zh-CN.md)
 
-## 使用
+</div>
 
-1. 双击 **Start Linger.cmd**（首次使用先运行 `setup.cmd`）。
-2. 左上角选择音频来源，一般保持「系统默认」即可。
-3. 点 **开始**。到这一步才会连接 ElevenLabs 并开始计费。
+![Linger in dark mode](docs/ui-dark.png)
 
-不需要 VB-CABLE，也不需要改 Zoom 的任何设置。程序录的是系统送往扬声器的数字信号，用笔记本扬声器或耳机都一样，也录不到你自己的麦克风。
+## Overview
 
-**面试前**：在「⋯ → 面试前自检」里检查一遍。它会先监听扬声器 3 秒，再连一次 API，确认密钥有效。另外请打开 Windows 的「勿扰」，免得通知音被录进去。
+Linger captures the audio your computer is playing — from a video call, an online lecture, a webinar, or a recorded video — and transcribes it into English text in real time using the [ElevenLabs Scribe](https://elevenlabs.io/speech-to-text) realtime speech-to-text model.
 
-> 「系统默认」会跟随 Windows 当前的输出设备。如果 Zoom 的扬声器设置成了某个特定设备（而不是「与系统相同」），这里也选同一个。
+Most live-caption tools are designed to be glanced at: text scrolls past and disappears. Linger is designed to be **worked with**. Finalized text is never rewritten, the view never moves while you are reading or selecting, and any passage can be copied with a single keystroke from any application — to look up an unfamiliar term, for instance, or to paste a sentence into a translator.
 
-### 密钥
+## Features
 
-按顺序读取 `ELEVENLABS_API_KEY`：进程环境变量 → Windows 用户 / 系统环境变量 → 程序目录下的 `.env` 或 `.env.txt`：
+- **System audio capture** — Records any output device through WASAPI loopback. No virtual audio cable, additional driver, or change to other applications' audio settings is required, and microphone input is never captured.
+- **Stable, append-only transcript** — Finalized text is written once and never modified. Only the line currently being recognized updates, and it pauses while it is selected.
+- **Segment-level selection** — Click the timestamp gutter to select a whole segment; extend the selection with <kbd>Shift</kbd>, toggle segments with <kbd>Ctrl</kbd>, or drag across several. Free-form text selection across segments is also supported.
+- **Global copy hotkey** — Press <kbd>Ctrl</kbd>+<kbd>`</kbd> in any application to copy the most recent utterance. Press again within two seconds to include one more preceding segment.
+- **Translator-friendly output** — Multiple segments are joined into a single line, so a sentence interrupted by a pause remains one sentence when pasted.
+- **Automatic reconnection** — Transient network and service interruptions are recovered from automatically, and each gap is marked in the transcript.
+- **Automatic saving** — Every segment is appended to a timestamped text file as soon as it is finalized.
+- **Self-test** — Verifies audio capture and API credentials before a session.
+- **Light and dark themes**, adjustable text size, and an always-on-top mode.
 
-```
-ELEVENLABS_API_KEY=你的密钥
-```
+## Requirements
 
-密钥只在内存中用于握手请求头，不会进入日志或文件。
+- Windows 10 or Windows 11
+- Python 3.13 or later
+- An [ElevenLabs](https://elevenlabs.io) API key with access to realtime speech-to-text
 
-## 复制一句话
-
-教授的话是按**停顿**切成段的，不是按句子切的。所以一句话可能被切成几段，事后的补充或纠正也是单独的一段。下面几种方式都可以把需要的部分完整拿到：
-
-| 想要 | 怎么做 |
-|---|---|
-| 刚刚说的那句 | 在**任何窗口**（包括 Zoom 里）按 `` Ctrl+` ``。2 秒内再按一次，就往前多带一段 |
-| 某几段 | 点左侧的时间选中一段；按住 Shift 点另一段，选中中间所有段；按住 Ctrl 点，挑选不连续的几段；也可以按住拖动 |
-| 任意几个词 | 直接在文字上拖选，可以跨段 |
-
-多段合并时用空格连接，粘贴到翻译软件里就是一句完整的话。
-
-**内容不会乱跑**：已经确定的文字只会在下方追加，从不改动。你在选择时屏幕不会滚动，往上翻看时也会自动停止跟随，底部出现「回到最新」按钮。唯一会变化的是最后一行灰色的「正在识别」文字，你选中它时它也会暂停更新。
-
-快捷键可以在「⋯ → 全局复制快捷键」里换成 `` Alt+` ``、F8、F9 或关闭。
-
-## 可靠性
-
-- **断线自动重连**：网络抖动或服务端超时后会立刻重连（0.3 秒起，逐步退避），不需要任何操作。文字里会标出「连接中断约 N 秒」，断线时没说完的那半句以灰色斜体保留。只有密钥无效、额度用完这类重连也解决不了的错误才会停止。
-- **自动保存**：每一段都会实时写入 `文档\Linger\日期 时间.txt`，带时间戳。关窗口、程序崩溃都不会丢。
-- **不做静音自动暂停**：你回答问题时教授是安静的，如果因此暂停，下一个问题开头那一两秒就会漏掉。
-
-## 其他
-
-- 右上角图钉：窗口置顶，可以盖在 Zoom 上方。
-- `Ctrl =` / `Ctrl -` 调整字号。外观可以选浅色、深色或跟随系统。
-- 设置（音频来源、字号、主题、快捷键、窗口位置）都会被记住。
-
-## 开发
-
-```
-linger/
-  audio.py       WASAPI 扬声器回环采集、降混为单声道 PCM16、100 ms 分包
-  scribe.py      密钥读取、连接参数、事件解码与错误分级（致命 / 可重试）
-  engine.py      工作线程：asyncio 收发、自动重连、自检；通过 Mailbox 交给界面
-  transcript.py  段落模型、「最近一句」分组、自动保存
-  view.py        转录视图：追加式文字流、时间栏多选、跟随与冻结逻辑
-  hotkey.py      Win32 全局快捷键
-  window.py      主窗口
-  theme.py       配色、样式表、图标、Windows 标题栏着色
-```
+## Installation
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q          # 只连本机，禁止外部 DNS 和网络
-.\.venv\Scripts\python.exe tools\preview.py      # 用示例文字渲染界面截图到 docs/
+git clone https://github.com/BocchiJamSuki/linger.git
+cd linger
+.\setup.cmd
 ```
 
-参数：`scribe_v2_realtime`，`language_code=en`，VAD 提交（静音 0.7 s）。音频以设备原生的 48 kHz 单声道 PCM16 发送，每块 100 ms。音频积压超过 500 ms 或单次发送超过 1 s 时，会丢弃旧音频并重新同步，避免越听越落后。
+`setup.cmd` creates a virtual environment in `.venv` and installs the dependencies listed in `requirements-dev.txt`.
 
-## 许可证
+## Configuration
 
-[MIT](LICENSE) © 2026 BocchiJamSuki
+Linger reads the API key from the `ELEVENLABS_API_KEY` variable, checking the following locations in order:
+
+1. The environment of the running process
+2. Windows user and system environment variables, including values set after the application was launched
+3. A `.env` (or `.env.txt`) file in the project directory:
+
+   ```dotenv
+   ELEVENLABS_API_KEY=your-api-key
+   ```
+
+## Usage
+
+Launch Linger with **`Start Linger.cmd`**, or from a terminal:
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+1. Select an audio source in the toolbar. **系统默认** (*System default*) follows the Windows default output device. If the application you want to transcribe plays through a specific device, select that device instead.
+2. Click **开始** (*Start*). A connection to ElevenLabs is opened only at this point; launching the application does not capture audio or incur usage.
+3. Click **停止** (*Stop*) to end the session. Words not yet finalized are retained and shown in italics.
+
+Before an important session, choose **⋯ → 运行自检** (*Run self-test*) to confirm that audio is being captured and that the API key is valid. Enabling Windows *Do Not Disturb* prevents notification sounds from being transcribed.
+
+### Selecting and copying text
+
+Speech is segmented at natural pauses rather than at sentence boundaries, so a single sentence — or a later correction to it — may span several segments. Linger offers several ways to capture exactly what is needed:
+
+| To copy | Action |
+| --- | --- |
+| The most recent utterance | Press <kbd>Ctrl</kbd>+<kbd>`</kbd> in any application. Press again to reach one segment further back. |
+| One or more whole segments | Click a timestamp. <kbd>Shift</kbd>+click selects a range, <kbd>Ctrl</kbd>+click adds or removes a segment, and dragging along the gutter selects consecutive segments. |
+| Any span of words | Drag across the text, including across segments. |
+| The entire transcript | **⋯ → 复制全部内容** (*Copy all*) |
+
+While a selection exists, or after scrolling up, the view stops following new text. A **回到最新** (*Jump to latest*) button appears for returning to the live position.
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>`</kbd> | Copy the most recent utterance (system-wide) |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy the current selection |
+| <kbd>Esc</kbd> | Clear the selection |
+| <kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> | Increase / decrease text size |
+
+The system-wide hotkey can be changed to <kbd>Alt</kbd>+<kbd>`</kbd>, <kbd>F8</kbd>, or <kbd>F9</kbd>, or disabled, under **⋯ → 全局复制快捷键** (*Global copy hotkey*).
+
+## Reliability
+
+- **Reconnection.** When a connection drops, Linger reconnects immediately and then with increasing back-off. Words still being recognized at the time are preserved and marked as unconfirmed, and the transcript records the length of the interruption. A session stops only on errors that retrying cannot resolve, such as an invalid key or an exhausted quota.
+- **Latency control.** If captured audio falls more than 500 ms behind, or a single transmission takes longer than one second, stale audio is discarded and the stream resynchronizes instead of drifting further behind.
+- **Continuous streaming.** Audio is streamed for the full duration of a session, including silences, so the beginning of the next utterance is never lost to a reconnection delay.
+
+## Data and privacy
+
+- Audio is sent to ElevenLabs only while a session is running. Launching the application, selecting a device, and the audio portion of the self-test are entirely local.
+- The API key is held in memory and used only in the connection request header. It is never written to logs, files, or URLs.
+- Transcripts are saved locally to `Documents\Linger\` as timestamped UTF-8 text files. No other data is stored or transmitted.
+- Preferences (audio source, theme, text size, hotkey, and window position) are stored in the Windows registry under `HKEY_CURRENT_USER\Software\Linger`.
+
+## Limitations
+
+- Windows only; audio capture relies on WASAPI loopback.
+- Transcription language is fixed to English.
+- The user interface is currently available in Simplified Chinese only.
+- Recognition accuracy, latency, and pricing are determined by the ElevenLabs service.
+
+## Development
+
+```text
+linger/
+├── audio.py        WASAPI loopback capture, mono PCM16 conversion, 100 ms packetization
+├── scribe.py       Credentials, connection parameters, event decoding, error classification
+├── engine.py       Worker thread: streaming, reconnection, self-test
+├── transcript.py   Segment model, utterance grouping, autosave
+├── view.py         Transcript view: append-only stream, gutter selection, follow behaviour
+├── hotkey.py       System-wide hotkey (Win32 RegisterHotKey)
+├── window.py       Main window
+└── theme.py        Palettes, stylesheet, icons, title bar tinting
+```
+
+Run the test suite (network access is restricted to localhost):
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Regenerate the screenshots in `docs/`:
+
+```powershell
+.\.venv\Scripts\python.exe tools\preview.py
+```
+
+Transcription uses the `scribe_v2_realtime` model with voice-activity-based commits (0.7 s silence threshold). Audio is transmitted as 48 kHz mono 16-bit PCM in 100 ms chunks.
+
+## License
+
+Released under the [MIT License](LICENSE).

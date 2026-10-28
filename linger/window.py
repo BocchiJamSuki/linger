@@ -206,7 +206,7 @@ class Window(QMainWindow):
             looks.addAction(action)
 
         menu.addSeparator()
-        self.selftest_action = menu.addAction('面试前自检（音频 + API）', lambda: self.start('selftest'))
+        self.selftest_action = menu.addAction('运行自检（音频 + API）', lambda: self.start('selftest'))
         menu.addAction('复制全部内容', self.copy_all)
         menu.addAction('打开记录文件夹', self.open_records)
         self.new_action = menu.addAction('新建记录（清空屏幕）', self.new_transcript)
@@ -267,7 +267,7 @@ class Window(QMainWindow):
         self.pin_button.setChecked(self.pinned)
         self.pin_button.setIcon(theme.glyph_icon(Glyph.PINNED if self.pinned else Glyph.PIN,
                                                  c.accent if self.pinned else c.text2))
-        self.pin_button.setToolTip('取消置顶' if self.pinned else '窗口置顶，显示在 Zoom 上方')
+        self.pin_button.setToolTip('取消置顶' if self.pinned else '窗口置顶，始终显示在其他窗口上方')
 
     def apply_hotkey(self, combo):
         ok = self.hotkey.register(combo) if self.hotkey else True
