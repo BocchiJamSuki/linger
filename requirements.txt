@@ -1,0 +1,4 @@
+PySide6==6.11.2
+numpy==2.5.3
+websockets==17.1
+SoundCard==0.4.6
