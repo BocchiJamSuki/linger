@@ -14,6 +14,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QTextEdit, QWidget
 
 from . import theme
+from .i18n import tr
 from .transcript import GAP, PROVISIONAL, RESUME, SPEECH, Segment, join_speech, recent_group
 
 PARTIAL = -100  # userState of the live block (Qt's default for new blocks is -1).
@@ -98,9 +99,9 @@ class TranscriptView(QTextEdit):
         bar.setSpacing(2)
         self.selbar_text = QLabel()
         self.selbar_text.setObjectName('selbarText')
-        self.copy_button = QPushButton('复制')
+        self.copy_button = QPushButton()
         self.copy_button.setProperty('kind', 'bar')
-        self.cancel_button = QPushButton('取消')
+        self.cancel_button = QPushButton()
         self.cancel_button.setProperty('kind', 'barquiet')
         for w in (self.selbar_text, self.copy_button, self.cancel_button):
             bar.addWidget(w)
@@ -110,7 +111,14 @@ class TranscriptView(QTextEdit):
         self.on_copy = lambda n: None   # Window hook for feedback.
 
         self.verticalScrollBar().valueChanged.connect(self._scrolled)
+        self.retranslate()
         self.reset()
+
+    def retranslate(self):
+        self.copy_button.setText(tr('copy'))
+        self.cancel_button.setText(tr('cancel'))
+        self._update_floating()
+        self.viewport().update()
 
     # ── formats ───────────────────────────────────────────────────────────────
     def _speech_block(self):
@@ -416,11 +424,11 @@ class TranscriptView(QTextEdit):
         self.menu_open = True
         try:
             menu = QMenu(self)
-            copy = menu.addAction('复制')
+            copy = menu.addAction(tr('copy'))
             copy.setShortcut(QKeySequence.StandardKey.Copy)
             copy.setEnabled(bool(self.selected_text()))
             copy.triggered.connect(self.copy_selection)
-            menu.addAction('全选').triggered.connect(self.selectAll)
+            menu.addAction(tr('select_all')).triggered.connect(self.selectAll)
             menu.exec(event.globalPos())
         finally:
             self.menu_open = False
@@ -439,7 +447,7 @@ class TranscriptView(QTextEdit):
         rect = self.contentsRect()
         if self.picked:
             n = len(self.picked)
-            self.selbar_text.setText(f'已选 {n} 段')
+            self.selbar_text.setText(tr('sel.count', n=n))
             self.selbar.adjustSize()
             self.selbar.move(rect.center().x() - self.selbar.width() // 2, rect.bottom() - self.selbar.height() - 16)
             self.selbar.show()
@@ -449,7 +457,7 @@ class TranscriptView(QTextEdit):
         self.selbar.hide()
         show_jump = not self.follow or (self.reading() and self.unseen)
         if show_jump:
-            self.jump.setText(f'{self.unseen} 段新内容  ↓' if self.unseen else '回到最新  ↓')
+            self.jump.setText(tr('jump.new', n=self.unseen) if self.unseen else tr('jump'))
             self.jump.adjustSize()
             self.jump.move(rect.center().x() - self.jump.width() // 2, rect.bottom() - self.jump.height() - 16)
             self.jump.raise_()
@@ -493,7 +501,7 @@ class TranscriptView(QTextEdit):
         rect = QRectF(self.viewport().rect())
         p.setPen(theme.qcolor(c.text2))
         p.setFont(theme.font(theme.UI_FONTS, 16, QFont.Weight.DemiBold))
-        p.drawText(rect.adjusted(0, -24, 0, -24), Qt.AlignmentFlag.AlignCenter, '对方说的话会实时出现在这里')
+        p.drawText(rect.adjusted(0, -24, 0, -24), Qt.AlignmentFlag.AlignCenter, tr('empty.title'))
         p.setPen(theme.qcolor(c.muted))
         p.setFont(theme.font(theme.UI_FONTS, 13))
         p.drawText(rect.adjusted(0, 22, 0, 22), Qt.AlignmentFlag.AlignCenter, self.empty_hint)

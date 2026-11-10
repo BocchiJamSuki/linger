@@ -7,7 +7,9 @@ from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from linger import credentials, i18n
 from linger.audio import Source
+from linger.keydialog import KeyDialog
 from linger.transcript import FINAL, GAP
 from linger.view import PARTIAL, TranscriptView
 from linger.window import Window
@@ -151,6 +153,8 @@ def test_markers_are_not_copied_and_keep_live_words(view, clipboard):
 def make_window(qtbot, tmp_path, talker):
     def make(**kwargs):
         settings = QSettings(str(tmp_path / 'settings.ini'), QSettings.Format.IniFormat)
+        if not settings.contains('ui/language'):
+            settings.setValue('ui/language', 'zh')
         kwargs.setdefault('engine_factory', talker)
         kwargs.setdefault('sources', lambda: [Source('', 'Default speaker'), Source('b', 'Other speaker')])
         w = Window(settings=settings, hotkeys=False, records=tmp_path / 'records', **kwargs)
@@ -221,3 +225,67 @@ def test_remembers_source_and_handles_no_devices(make_window):
     assert not empty.primary.isEnabled()
     empty.start()
     assert empty.worker is None and empty.pill.label.text() == '出错'
+
+
+def test_interface_language_switches_live_and_persists(make_window):
+    w = make_window()
+    assert w.primary.text().strip() == '开始' and w.pill.label.text() == '未开始'
+    w.set_ui_language('en')
+    assert w.primary.text().strip() == 'Start' and w.pill.label.text() == 'Idle'
+    assert 'Ready' in w.status.text() and 'copies the latest' in w.hotkey_note.text()
+    assert [a.text() for a in w.menu.actions() if a.text()][:2] == ['Larger text', 'Smaller text']
+    again = make_window()
+    assert i18n.language() == 'en' and again.primary.text().strip() == 'Start'
+    again.set_ui_language('zh')
+    assert again.primary.text().strip() == '开始'
+
+
+def test_spoken_language_reaches_the_engine(make_window, talker):
+    w = make_window()
+    w.start()
+    assert talker.created[-1].language == 'en'
+    w.stop()
+    talker.created[-1].join()
+    w.tick()
+    w.set_speech_language('ja')
+    w.start()
+    assert talker.created[-1].language == 'ja'
+    w.stop()
+    talker.created[-1].join()
+    w.tick()
+    w.set_speech_language('auto')  # Auto-detect: the service receives no language at all.
+    w.start()
+    assert talker.created[-1].language is None
+    w.stop()
+    talker.created[-1].join()
+    w.tick()
+
+
+def test_start_without_a_key_asks_for_one_instead_of_failing(make_window, monkeypatch, talker):
+    monkeypatch.delenv('ELEVENLABS_API_KEY')
+    monkeypatch.setattr('linger.scribe.env_dirs', lambda: ())
+    monkeypatch.setattr('linger.scribe._from_registry', lambda: '')
+    w = make_window()
+    asked = []
+    monkeypatch.setattr(w, 'edit_key', lambda: asked.append(1) and False)
+    w.start()
+    assert asked == [1] and w.worker is None and not talker.created
+
+
+def test_key_dialog_warns_about_key_ids_and_saves_to_the_store(qtbot, monkeypatch):
+    written = []
+    monkeypatch.setattr(credentials, 'write', lambda value, *a: written.append(value) or True)
+    dialog = KeyDialog()
+    qtbot.addWidget(dialog)
+    dialog.save()
+    assert not written and dialog.message.text()  # Empty.
+    dialog.field.setText('  0123456789abcdef  ')
+    dialog.save()
+    assert not written and 'Key ID' in dialog.message.text()  # Looks like an ID: ask once.
+    dialog.save()
+    assert written == ['0123456789abcdef'] and dialog.result() == KeyDialog.DialogCode.Accepted
+    second = KeyDialog()
+    qtbot.addWidget(second)
+    second.field.setText('sk_abc')
+    second.save()
+    assert written[-1] == 'sk_abc' and second.outcome

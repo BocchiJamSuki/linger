@@ -4,6 +4,11 @@ import time
 import linger  # noqa: F401
 import pytest
 
+from linger import i18n
+
+LOUD = b'\x00\x20' * 1600   # 100 ms of 16 kHz mono PCM16 at a quarter of full scale.
+SILENT = bytes(3200)
+
 
 @pytest.fixture(autouse=True)
 def prohibit_external_network(monkeypatch):
@@ -24,18 +29,24 @@ def prohibit_external_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def fake_key(monkeypatch):
+def isolated_environment(monkeypatch):
+    """A placeholder key, no access to the real credential store, and a fixed interface language."""
     monkeypatch.setenv('ELEVENLABS_API_KEY', 'offline-test-placeholder')
+    monkeypatch.setattr('linger.credentials.read', lambda *a, **k: '')
+    i18n.set_language('zh')
+    yield
+    i18n.set_language('zh')
 
 
 class FakeCapture:
-    """Produces a 100 ms block of quiet audio every 10 ms. No devices are touched."""
+    """Produces a 100 ms block every 10 ms (ten times real time). No devices are touched."""
     instances = []
+    payload = LOUD
 
     def __init__(self, source, stopped):
+        self.source = source
         self.stopped = stopped
         self.opened = self.started = self.closed = False
-        self.peak = 0.25
         self.next = 0
         self.instances.append(self)
 
@@ -50,7 +61,7 @@ class FakeCapture:
             return None
         if time.monotonic() >= self.next:
             self.next = time.monotonic() + 0.01
-            return bytes(9600)
+            return self.payload
         return None
 
     def close(self):
@@ -60,16 +71,20 @@ class FakeCapture:
 @pytest.fixture
 def fake_capture():
     FakeCapture.instances.clear()
-    return FakeCapture
+    FakeCapture.payload = LOUD
+    yield FakeCapture
+    FakeCapture.payload = LOUD
 
 
 class Talker(threading.Thread):
     """Engine stand-in for UI tests: streams partials, commits every tenth. No audio, no network."""
+    created = []
 
-    def __init__(self, source, mailbox, *, mode='live'):
+    def __init__(self, source, mailbox, *, mode='live', language='en'):
         super().__init__(daemon=False)
-        self.mailbox, self.mode = mailbox, mode
+        self.mailbox, self.mode, self.language = mailbox, mode, language
         self.stopped = threading.Event()
+        self.created.append(self)
 
     def stop(self):
         self.stopped.set()
@@ -91,4 +106,5 @@ class Talker(threading.Thread):
 
 @pytest.fixture
 def talker():
+    Talker.created.clear()
     return Talker

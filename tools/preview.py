@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from linger.audio import Source
 from linger.engine import LIVE
+from linger.i18n import tr
 from linger.transcript import FINAL, GAP
 from linger.window import Window
 
@@ -32,13 +33,16 @@ class Alive:
         pass
 
 
-def render(mode, out):
+def render(mode, language, out):
     tmp = Path(tempfile.mkdtemp())
     settings = QSettings(str(tmp / 'preview.ini'), QSettings.Format.IniFormat)
     settings.setValue('theme', mode)
-    sources = [Source('', '系统默认 · 扬声器 (Realtek(R) Audio)'), Source('x', '扬声器 (Realtek(R) Audio)')]
+    settings.setValue('ui/language', language)
+    sources = [Source('', ('系统默认 · ' if language == 'zh' else 'System default · ') + 'Speakers (Realtek(R) Audio)'),
+               Source('x', 'Speakers (Realtek(R) Audio)')]
     w = Window(settings=settings, sources=lambda: sources, hotkeys=False, records=tmp / 'records')
-    w.apply_hotkey('Ctrl+`')
+    w.settings.setValue('hotkey', 'Ctrl+`')
+    w.retranslate()
     w.resize(940, 720)
     w.show()
     base = 1_800_000_000
@@ -46,15 +50,15 @@ def render(mode, out):
         seg = w.view.push_segment(FINAL, text)
         seg.start = seg.end = base + offset
     w.view.origin = base
-    gap = w.view.push_segment(GAP, '连接中断约 2 秒 · 已自动恢复')
+    w.view.push_segment(GAP, tr('mark.gap', n=3))
     seg = w.view.push_segment(FINAL, 'Sorry, could you repeat the last part?')
     seg.start = seg.end = base + 58
     w.view.push_partial('Yes, so what I was asking is whether the simulation results would')
     w.view.flush()
     w.worker, w.mode = Alive(), 'live'
     w._update_controls()
-    w.set_status('正在实时转写', LIVE)
-    w.saved.setText('已自动保存 · 2026-10-29 1403.txt')
+    w.set_status(tr('status.live'), LIVE)
+    w.saved.setText(tr('saved', name='2026-11-10 1403.txt'))
     w.saved.show()
     w.meter.set_peak(0.2)
     for _ in range(30):
@@ -75,5 +79,6 @@ app.setStyle('Fusion')
 folder = Path(__file__).resolve().parents[1] / 'docs'
 folder.mkdir(exist_ok=True)
 for mode in ('dark', 'light'):
-    render(mode, folder / f'ui-{mode}.png')
+    render(mode, 'en', folder / f'ui-{mode}.png')
+    render(mode, 'zh', folder / f'ui-{mode}.zh-CN.png')
 print('saved to', folder)

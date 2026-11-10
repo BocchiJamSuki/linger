@@ -10,10 +10,13 @@ from PySide6.QtWidgets import (
     QSizePolicy, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
-from . import hotkey, theme
+from . import hotkey, i18n, theme
 from .audio import list_sources
-from .engine import BUSY, COMMIT, ERROR, GAP as GAP_EVENT, IDLE, LIVE, OK, PROVISIONAL as PROVISIONAL_EVENT, WARN
-from .engine import Engine, Mailbox
+from .engine import BUSY, COMMIT, ERROR, GAP as GAP_EVENT, IDLE, LIVE, OK, PROVISIONAL as PROVISIONAL_EVENT
+from .engine import QUIET, WARN, Engine, Mailbox
+from .i18n import tr
+from .keydialog import KeyDialog
+from .scribe import find_key
 from .theme import Glyph
 from .transcript import FINAL, GAP, PROVISIONAL, RESUME, Recorder
 from .view import TranscriptView
@@ -22,6 +25,7 @@ from .widgets import LevelMeter, StatusPill
 FONT_SIZES = (15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 32)
 DEFAULT_FONT_SIZE = 19
 HOTKEY_REPEAT = 2.0  # Seconds within which another press reaches one segment further back.
+AUTO = 'auto'        # Stored value for "let the service detect the spoken language".
 
 
 def records_folder():
@@ -30,7 +34,7 @@ def records_folder():
 
 
 class SourceBox(QComboBox):
-    """Re-scans speakers every time it opens, so a newly plugged device just appears."""
+    """Re-scans output devices every time it opens, so a newly plugged device just appears."""
 
     def __init__(self, refresh):
         super().__init__()
@@ -53,15 +57,17 @@ class Window(QMainWindow):
         self.stopping = self.closing = False
         self.tone = IDLE
         self.colors = theme.DARK
+        self.menu = None
         self.hotkey_presses = (0.0, 0)
+        self.hotkey_ok = True
         self.font_size = int(self.settings.value('font/size', DEFAULT_FONT_SIZE))
         self.pinned = self.settings.value('window/pinned', False, type=bool)
+        self._use_language()
 
         self.setWindowTitle('Linger')
         self.setMinimumSize(560, 420)
         self.resize(940, 720)
         self._build()
-        self._build_menu()
         if self.pinned:
             self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         geometry = self.settings.value('window/geometry')
@@ -69,11 +75,13 @@ class Window(QMainWindow):
             self.restoreGeometry(geometry)
 
         self.hotkey = hotkey.GlobalHotkey(QApplication.instance(), self.copy_recent) if hotkeys else None
-        self.apply_hotkey(self.settings.value('hotkey', hotkey.DEFAULT))
+        self.hotkey_ok = self.hotkey.register(self.hotkey_combo()) if self.hotkey else True
         self.apply_theme()
         self.apply_font_size()
-        self.set_status('准备就绪。点「开始」才会连接 ElevenLabs 并计费。')
-        self.refresh_sources()  # May replace the status with a device problem.
+        self.set_status(tr('status.ready'))
+        self.retranslate()  # Builds the menu and fills every label; may report a device problem.
+        if self.hotkey_combo() and not self.hotkey_ok:
+            self.set_status(tr('status.hotkey_taken', combo=self.hotkey_combo()), WARN)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -103,7 +111,6 @@ class Window(QMainWindow):
         bar.addSpacing(10)
         self.source = SourceBox(self.refresh_sources)
         self.source.setObjectName('source')
-        self.source.setToolTip('要转写的声音来源：录下这个扬声器正在播放的内容')
         self.source.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.source.setMaximumWidth(360)
         self.source.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
@@ -120,10 +127,11 @@ class Window(QMainWindow):
         self.pill = StatusPill()
         bar.addWidget(self.pill)
         bar.addSpacing(4)
-        self.pin_button = self._icon_button('窗口置顶')
+        self.pin_button = self._icon_button()
         self.pin_button.setCheckable(True)
         self.pin_button.clicked.connect(self.toggle_pin)
-        self.more_button = self._icon_button('更多')
+        self.more_button = self._icon_button()
+        self.more_button.clicked.connect(self.show_menu)
         bar.addWidget(self.pin_button)
         bar.addWidget(self.more_button)
         bar.addSpacing(4)
@@ -136,7 +144,7 @@ class Window(QMainWindow):
         page.addWidget(top)
 
         self.view = TranscriptView()
-        self.view.on_copy = lambda n: self.flash(f'已复制 {n} 段')
+        self.view.on_copy = lambda n: self.flash(tr('toast.copied', n=n))
         page.addWidget(self.view, 1)
 
         status = QFrame()
@@ -145,11 +153,11 @@ class Window(QMainWindow):
         row.setContentsMargins(16, 6, 16, 7)
         row.setSpacing(10)
         self.meter = LevelMeter()
-        self.meter.setToolTip('输入电平')
         row.addWidget(self.meter)
         self.status = QLabel()
         self.status.setObjectName('statusText')
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # Long texts elide the row, not widen the window.
         row.addWidget(self.status, 1)
         self.toast = QLabel()
         self.toast.setObjectName('toast')
@@ -159,7 +167,6 @@ class Window(QMainWindow):
         self.saved.setFlat(True)
         self.saved.setCursor(Qt.CursorShape.PointingHandCursor)
         self.saved.setStyleSheet('QPushButton { background: transparent; border: none; padding: 0; min-height: 0; }')
-        self.saved.setToolTip('打开记录文件夹')
         self.saved.clicked.connect(self.open_records)
         self.saved.hide()
         row.addWidget(self.saved)
@@ -173,50 +180,96 @@ class Window(QMainWindow):
         QShortcut(QKeySequence.StandardKey.ZoomIn, self, lambda: self.step_font(1))
         QShortcut(QKeySequence.StandardKey.ZoomOut, self, lambda: self.step_font(-1))
 
-    def _icon_button(self, tip):
+    def _icon_button(self):
         b = QPushButton()
         b.setProperty('kind', 'icon')
-        b.setToolTip(tip)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         return b
 
+    def _choices(self, menu, title, options, current, chosen):
+        """A submenu of mutually exclusive options: [(value, label)]."""
+        sub = menu.addMenu(title)
+        group = QActionGroup(sub)
+        for value, label in options:
+            action = QAction(label, sub, checkable=True)
+            action.setChecked(value == current)
+            action.triggered.connect(lambda _=False, v=value: chosen(v))
+            group.addAction(action)
+            sub.addAction(action)
+        return sub
+
     def _build_menu(self):
         menu = QMenu(self)
-        menu.addAction('放大字号', lambda: self.step_font(1)).setShortcut(QKeySequence('Ctrl+='))
-        menu.addAction('缩小字号', lambda: self.step_font(-1)).setShortcut(QKeySequence('Ctrl+-'))
+        menu.addAction(tr('menu.font_up'), lambda: self.step_font(1)).setShortcut(QKeySequence('Ctrl+='))
+        menu.addAction(tr('menu.font_down'), lambda: self.step_font(-1)).setShortcut(QKeySequence('Ctrl+-'))
         menu.addSeparator()
-
-        keys = menu.addMenu('全局复制快捷键')
-        self.hotkey_actions = QActionGroup(self)
-        for combo in [*hotkey.COMBOS, None]:
-            action = QAction(combo or '关闭', self, checkable=True)
-            action.setData(combo)
-            action.triggered.connect(lambda _=False, c=combo: self.apply_hotkey(c))
-            self.hotkey_actions.addAction(action)
-            keys.addAction(action)
-
-        looks = menu.addMenu('外观')
-        self.theme_actions = QActionGroup(self)
-        for mode, text in (('system', '跟随系统'), ('light', '浅色'), ('dark', '深色')):
-            action = QAction(text, self, checkable=True)
-            action.setData(mode)
-            action.setChecked(self.settings.value('theme', 'system') == mode)
-            action.triggered.connect(lambda _=False, m=mode: self.set_theme(m))
-            self.theme_actions.addAction(action)
-            looks.addAction(action)
-
+        self._choices(menu, tr('menu.speech'),
+                      [(code or AUTO, name or tr('menu.auto')) for code, name in i18n.SPEECH_LANGUAGES],
+                      self.settings.value('speech/language', 'en'), self.set_speech_language)
+        self._choices(menu, tr('menu.hotkey'), [(c, c) for c in hotkey.COMBOS] + [(None, tr('menu.off'))],
+                      self.hotkey_combo(), self.apply_hotkey)
         menu.addSeparator()
-        self.selftest_action = menu.addAction('运行自检（音频 + API）', lambda: self.start('selftest'))
-        menu.addAction('复制全部内容', self.copy_all)
-        menu.addAction('打开记录文件夹', self.open_records)
-        self.new_action = menu.addAction('新建记录（清空屏幕）', self.new_transcript)
+        self._choices(menu, tr('menu.theme'),
+                      [('system', tr('menu.system')), ('light', tr('menu.light')), ('dark', tr('menu.dark'))],
+                      self.settings.value('theme', 'system'), self.set_theme)
+        self._choices(menu, tr('menu.ui_language'),
+                      [('system', tr('menu.system'))] + list(i18n.LANGUAGES.items()),
+                      self.settings.value('ui/language', 'system'), self.set_ui_language)
+        menu.addSeparator()
+        self.key_action = menu.addAction(tr('menu.key'), self.edit_key)
+        self.selftest_action = menu.addAction(tr('menu.selftest'), lambda: self.start('selftest'))
+        menu.addSeparator()
+        menu.addAction(tr('menu.copy_all'), self.copy_all)
+        menu.addAction(tr('menu.folder'), self.open_records)
+        self.new_action = menu.addAction(tr('menu.new'), self.new_transcript)
+        if self.menu is not None:
+            self.menu.deleteLater()
         self.menu = menu
-        self.more_button.clicked.connect(self.show_menu)
 
     def show_menu(self):
         # Right-aligned under the button, so the menu never hangs off the window's edge.
         corner = self.more_button.mapToGlobal(self.more_button.rect().bottomRight())
         self.menu.popup(corner + QPoint(-self.menu.sizeHint().width(), 6))
+
+    # ── language ──────────────────────────────────────────────────────────────
+    def _use_language(self):
+        choice = self.settings.value('ui/language', 'system')
+        i18n.set_language(choice if choice in i18n.LANGUAGES else i18n.system_language())
+
+    def set_ui_language(self, choice):
+        self.settings.setValue('ui/language', choice)
+        self._use_language()
+        self.retranslate()
+        if self.worker is None:
+            self.set_status(tr('status.ready'))
+
+    def set_speech_language(self, code):
+        self.settings.setValue('speech/language', code)
+
+    def speech_language(self):
+        code = self.settings.value('speech/language', 'en')
+        return None if code == AUTO else code
+
+    def retranslate(self):
+        """(Re)apply every static text in the current interface language."""
+        self._build_menu()
+        self.source.setToolTip(tr('source.tip'))
+        self.more_button.setToolTip(tr('more'))
+        self.meter.setToolTip(tr('meter.tip'))
+        self.saved.setToolTip(tr('saved.tip'))
+        if self.recorder.path is not None:
+            self.saved.setText(tr('saved', name=self.recorder.path.name))
+        combo = self.hotkey_combo()
+        if combo and self.hotkey_ok:
+            self.hotkey_note.setText(tr('hotkey.note', combo=combo))
+            self.view.empty_hint = tr('empty.hotkey', combo=combo)
+        else:
+            self.hotkey_note.setText('')
+            self.view.empty_hint = tr('empty.plain')
+        self.view.retranslate()
+        self._update_pin()
+        self.refresh_sources()
+        self.set_status(self.status.text(), self.tone)
 
     # ── appearance ────────────────────────────────────────────────────────────
     def is_dark(self):
@@ -267,61 +320,63 @@ class Window(QMainWindow):
         self.pin_button.setChecked(self.pinned)
         self.pin_button.setIcon(theme.glyph_icon(Glyph.PINNED if self.pinned else Glyph.PIN,
                                                  c.accent if self.pinned else c.text2))
-        self.pin_button.setToolTip('取消置顶' if self.pinned else '窗口置顶，始终显示在其他窗口上方')
+        self.pin_button.setToolTip(tr('pin.off') if self.pinned else tr('pin.on'))
+
+    def hotkey_combo(self):
+        combo = self.settings.value('hotkey', hotkey.DEFAULT)
+        return combo if combo in hotkey.COMBOS else None
 
     def apply_hotkey(self, combo):
-        ok = self.hotkey.register(combo) if self.hotkey else True
-        self.settings.setValue('hotkey', combo)
-        for action in self.hotkey_actions.actions():
-            action.setChecked(action.data() == combo)
-        if combo and ok:
-            self.hotkey_note.setText(f'{combo} 复制最近一句')
-            self.view.empty_hint = f'在任何窗口按 {combo} 复制最近一句 · 连按多带一段'
-        else:
-            self.hotkey_note.setText('')
-            self.view.empty_hint = '选中文字，或点击左侧时间选择整段'
-            if combo and not ok:
-                self.set_status(f'快捷键 {combo} 被其他程序占用，请在「更多」菜单里换一个。', WARN)
-        self.view.viewport().update()
+        self.settings.setValue('hotkey', combo or '')
+        self.hotkey_ok = self.hotkey.register(combo) if self.hotkey else True
+        self.retranslate()
+        if combo and not self.hotkey_ok:
+            self.set_status(tr('status.hotkey_taken', combo=combo), WARN)
 
     # ── status & controls ─────────────────────────────────────────────────────
     def set_status(self, text, tone=IDLE):
         self.tone = tone or IDLE
         self.status.setText(text)
+        self.status.setToolTip(text)
         if self.status.property('tone') != self.tone:
             self.status.setProperty('tone', self.tone)
             self.status.style().unpolish(self.status)
             self.status.style().polish(self.status)
         running = self.worker is not None
         if not running:
-            label, pill = {OK: ('自检通过', OK), ERROR: ('出错', ERROR), WARN: ('请注意', WARN)}.get(self.tone, ('未开始', IDLE))
+            label, pill = {OK: ('pill.ok', OK), ERROR: ('pill.error', ERROR),
+                           WARN: ('pill.warn', WARN)}.get(self.tone, ('pill.idle', IDLE))
         elif self.stopping:
-            label, pill = '正在停止', BUSY
+            label, pill = 'pill.stopping', BUSY
         elif self.mode == 'selftest':
-            label, pill = '自检中', BUSY
+            label, pill = 'pill.selftest', BUSY
         elif self.tone == LIVE:
-            label, pill = '转录中', LIVE
+            label, pill = 'pill.live', LIVE
+        elif self.tone == QUIET:
+            label, pill = 'pill.quiet', QUIET
         elif self.tone == WARN:
-            label, pill = '重连中', WARN
+            label, pill = 'pill.reconnecting', WARN
         else:
-            label, pill = '连接中', BUSY
-        self.pill.set_state(pill, label, self.colors.tone(pill), pulsing=running and pill in (LIVE, BUSY, WARN))
-        self.view.live = running and self.mode == 'live' and self.tone == LIVE
+            label, pill = 'pill.connecting', BUSY
+        self.pill.set_state(pill, tr(label), self.colors.tone(pill), pulsing=running and pill in (LIVE, BUSY, WARN))
+        self.view.live = running and self.mode == 'live' and self.tone in (LIVE, QUIET)
 
     def _update_controls(self):
         running = self.worker is not None
         has_source = self.source.currentData() is not None
         c = self.colors
         self.source.setEnabled(not running)
-        self.selftest_action.setEnabled(not running and has_source)
-        self.new_action.setEnabled(not running)
+        if self.menu is not None:
+            self.selftest_action.setEnabled(not running and has_source)
+            self.new_action.setEnabled(not running)
+            self.key_action.setEnabled(not running)
         if running:
-            self.primary.setText(' 停止中…' if self.stopping else ' 停止')
+            self.primary.setText(tr('stopping') if self.stopping else tr('stop'))
             self.primary.setIcon(theme.shape_icon('stop', c.muted if self.stopping else c.live))
             self.primary.setEnabled(not self.stopping)
             kind = 'danger'
         else:
-            self.primary.setText(' 开始')
+            self.primary.setText(tr('start'))
             self.primary.setIcon(theme.shape_icon('play', c.on_accent if has_source else c.muted))
             self.primary.setEnabled(has_source)
             kind = 'primary'
@@ -345,8 +400,8 @@ class Window(QMainWindow):
             self.source.addItem(icon, s.name, s)
         index = next((i for i, s in enumerate(found) if s.uid == wanted), 0)
         if not found:
-            self.source.addItem('没有找到扬声器')
-            self.set_status('没有找到可录制的扬声器。请检查 Windows 声音设置。', ERROR)
+            self.source.addItem(tr('source.none'))
+            self.set_status(tr('status.no_source'), ERROR)
         self.source.setCurrentIndex(index)
         self.source.blockSignals(False)
         # sizeHint ignores QSS padding, so size to the current label explicitly.
@@ -363,7 +418,7 @@ class Window(QMainWindow):
     def add_segment(self, kind, text, note=''):
         seg = self.view.push_segment(kind, text)
         if self.recorder.write(seg, note or text):
-            self.saved.setText(f'已自动保存 · {self.recorder.path.name}')
+            self.saved.setText(tr('saved', name=self.recorder.path.name))
             self.saved.show()
         return seg
 
@@ -379,17 +434,17 @@ class Window(QMainWindow):
         text, rows = self.view.recent(extra)
         self.hotkey_presses = (now, extra)
         if not text:
-            self.flash('还没有可以复制的内容')
+            self.flash(tr('toast.nothing'))
             return
         QApplication.clipboard().setText(text)
         self.view.flash(rows)
-        self.flash(f'已复制 {len(rows)} 段 · 再按一次多带一段')
+        self.flash(tr('toast.recent', n=len(rows)))
 
     def copy_all(self):
         text = '\n\n'.join(s.text for s in self.view.segments if s.kind in (FINAL, PROVISIONAL))
         if text:
             QApplication.clipboard().setText(text)
-            self.flash('已复制全部内容')
+            self.flash(tr('toast.all'))
 
     def open_records(self):
         folder = self.recorder.folder
@@ -400,13 +455,21 @@ class Window(QMainWindow):
     def new_transcript(self):
         if self.worker or not self.view.segments:
             return
-        answer = QMessageBox.question(self, '新建记录', '清空屏幕并开始一份新记录？\n当前内容已经自动保存，不会丢失。',
+        answer = QMessageBox.question(self, tr('new.title'), tr('new.body'),
                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                                       QMessageBox.StandardButton.Yes)
         if answer == QMessageBox.StandardButton.Yes:
             self.view.reset()
             self.recorder.new_file()
             self.saved.hide()
+
+    def edit_key(self):
+        """Returns True when a key was saved or removed."""
+        dialog = KeyDialog(self)
+        if not dialog.exec():
+            return False
+        self.set_status(dialog.outcome, OK)
+        return True
 
     # ── engine lifecycle ──────────────────────────────────────────────────────
     def toggle(self):
@@ -421,14 +484,15 @@ class Window(QMainWindow):
         source = self.source.currentData()
         if source is None:
             return
+        if not find_key()[0] and not (self.edit_key() and find_key()[0]):
+            return  # Ask for the key up front instead of failing after the click.
         if mode == 'live' and self.view.segments:
-            label = f'{datetime.now():%H:%M} 重新开始'
-            self.add_segment(RESUME, label)
+            self.add_segment(RESUME, tr('mark.resume', time=f'{datetime.now():%H:%M}'))
         self.mailbox = Mailbox()
-        self.worker = self.engine_factory(source, self.mailbox, mode=mode)
+        self.worker = self.engine_factory(source, self.mailbox, mode=mode, language=self.speech_language())
         self.mode = mode
         self.stopping = False
-        self.set_status('正在启动…', BUSY)
+        self.set_status(tr('status.starting'), BUSY)
         self._update_controls()
         self.worker.start()
 
@@ -436,7 +500,7 @@ class Window(QMainWindow):
         if self.worker and not self.stopping:
             self.worker.stop()
             self.stopping = True
-            self.set_status('正在停止…', BUSY)
+            self.set_status(tr('status.stopping'), BUSY)
             self._update_controls()
 
     def _absorb(self, snap):
@@ -446,7 +510,7 @@ class Window(QMainWindow):
             elif kind == PROVISIONAL_EVENT:
                 self.add_segment(PROVISIONAL, value)
             elif kind == GAP_EVENT:
-                self.add_segment(GAP, f'连接中断约 {max(1, round(value))} 秒 · 已自动恢复')
+                self.add_segment(GAP, tr('mark.gap', n=max(1, round(value))))
         if snap.partial is not None:
             self.view.push_partial(snap.partial)
         if snap.status is not None:
@@ -479,6 +543,12 @@ class Window(QMainWindow):
             self.close()
 
     # ── window ────────────────────────────────────────────────────────────────
+    def bring_to_front(self):
+        """Another launch was attempted: show this window instead of a second copy."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
     def showEvent(self, event):
         super().showEvent(event)
         theme.tint_title_bar(self, self.colors)

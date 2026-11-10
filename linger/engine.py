@@ -1,4 +1,10 @@
-"""The worker thread: owns capture and the socket, reconnects on its own, reports via a mailbox."""
+"""The worker thread: owns audio and the socket, reconnects on its own, reports via a mailbox.
+
+Audio and network are decoupled. A pump collects audio for the whole session into `unsent`;
+the sender drains it. While the link is down the audio simply waits, and after a reconnect
+the new session first receives everything the old one heard but never confirmed, so a drop
+in the middle of a sentence normally costs nothing.
+"""
 import asyncio
 from collections import deque
 import json
@@ -9,18 +15,26 @@ from typing import NamedTuple
 
 from websockets.asyncio.client import connect
 
-from .audio import LoopbackCapture, Packetizer
+from .audio import CHUNK_SECONDS, RATE, AudioFeed, LoopbackCapture, default_output
 from .errors import UserError
+from .i18n import tr
 from .scribe import SESSION_LIMIT, ServerEvent, api_key, audio_message, connection_url, decode_event
 
-# Status tones drive the UI's colour language.
-IDLE, BUSY, LIVE, OK, WARN, ERROR = 'idle', 'busy', 'live', 'ok', 'warn', 'error'
+# Status tones drive the UI's colour language. QUIET: connected, but no audio is arriving.
+IDLE, BUSY, LIVE, OK, WARN, ERROR, QUIET = 'idle', 'busy', 'live', 'ok', 'warn', 'error', 'quiet'
 
 # Transcript events, in arrival order.
 COMMIT, PROVISIONAL, GAP = 'commit', 'provisional', 'gap'
 
 RETRY_DELAYS = (0.3, 1, 2, 3, 5)
-MAX_FAILED_ATTEMPTS = 8  # Consecutive attempts that never reached a live session.
+BACKLOG_CHUNKS = 200       # 20 s of audio may wait for the network; beyond that the oldest is lost.
+UNCONFIRMED_CHUNKS = 300   # Audio kept for replay: sent, but its words are not committed yet.
+KEEP_AFTER_COMMIT = 7      # A commit follows 0.7 s of silence, so older audio is fully transcribed.
+REPLAY_SPEED = 4.0         # Catch-up pace as a multiple of real time (None: as fast as possible).
+NEVER_HEARD_AFTER = 10     # Seconds of live silence from the start before pointing at the routing.
+QUIET_AFTER = 5
+STALE_PARTIAL_AFTER = 8    # If a reconnect brings no new words, keep the old ones as unconfirmed.
+SEND_TIMEOUT = 2           # A send that blocks this long means the link is dead.
 
 
 class Snapshot(NamedTuple):
@@ -52,7 +66,7 @@ class Mailbox:
                 self.partial = self.speaking = text
 
     def interrupt(self):
-        """The connection dropped mid-sentence: keep the words, marked as unconfirmed."""
+        """Words in progress will never be confirmed: keep them, marked as such."""
         with self.lock:
             if self.speaking.strip():
                 self.events.append((PROVISIONAL, self.speaking))
@@ -81,22 +95,34 @@ class Mailbox:
 class Engine(threading.Thread):
     """mode 'live' streams until stopped; mode 'selftest' checks audio and the API once."""
 
-    def __init__(self, source, mailbox, *, mode='live', connector=connect, capture_factory=LoopbackCapture,
-                 retry_delays=RETRY_DELAYS):
+    def __init__(self, source, mailbox, *, mode='live', language='en', connector=connect,
+                 capture_factory=LoopbackCapture, default_output=default_output,
+                 retry_delays=RETRY_DELAYS, replay_speed=REPLAY_SPEED):
         super().__init__(name='scribe-engine', daemon=False)
-        self.source, self.mailbox, self.mode = source, mailbox, mode
+        self.source, self.mailbox, self.mode, self.language = source, mailbox, mode, language
         self.connector = connector
         self.capture_factory = capture_factory
+        self.default_output = default_output
         self.retry_delays = retry_delays
+        self.replay_speed = replay_speed
         self.stopped = threading.Event()
-        self.loop = self.task = None
+        self.loop = self.task = self.pump = None
+        self.unsent = deque()        # Audio waiting for the network.
+        self.unconfirmed = deque()   # Audio sent since the last commit, replayed after a drop.
+        self.lost = 0                # Chunks dropped because the backlog overflowed.
+        self.link = (BUSY, '')       # Connection state as last set by the connection loop.
+        self.note = ('', 0.0)        # Short-lived remark appended to the live status.
+        self.reported = None
+        self.live_since = None
+        self.caught_up_at = 0.0
+        self.fresh = False           # Any transcript event on the current connection.
         self.sent_chunks = 0
         self.connections = 0
 
     def stop(self):
         if self.stopped.is_set():
             return
-        self.stopped.set()  # Capture stops accepting audio immediately.
+        self.stopped.set()
         if self.loop and self.task:
             try:
                 self.loop.call_soon_threadsafe(self.task.cancel)
@@ -107,15 +133,16 @@ class Engine(threading.Thread):
         try:
             asyncio.run(self._main())
         except Exception:
-            self.mailbox.state('后台任务异常，资源已释放。请重新开始。', ERROR)
+            self.mailbox.state(tr('err.background'), ERROR)
 
     async def _main(self):
         self.loop = asyncio.get_running_loop()
+        self.loop.set_exception_handler(_quiet_socket_teardown)
         self.task = asyncio.current_task()
         key = ''
         try:
             if self.stopped.is_set():
-                self.mailbox.state('已停止。')
+                self.mailbox.state(tr('status.stopped'))
                 return
             key = api_key()
             if self.mode == 'selftest':
@@ -123,150 +150,223 @@ class Engine(threading.Thread):
             else:
                 await self._live(key)
         except asyncio.CancelledError:
-            self.mailbox.state('自检已取消。' if self.mode == 'selftest' else '已停止。')
+            self.mailbox.state(tr('test.cancelled') if self.mode == 'selftest' else tr('status.stopped'))
         except UserError as exc:
             message = str(exc).replace(key, '[redacted]') if key else str(exc)
-            self.mailbox.state(message if len(message) < 240 else '会话失败，请检查设备和网络。', ERROR)
+            self.mailbox.state(message if len(message) < 300 else tr('err.session'), ERROR)
         except Exception as exc:
-            self.mailbox.state(f'意外错误（{type(exc).__name__}），资源已释放。', ERROR)
+            self.mailbox.state(tr('err.unexpected', name=type(exc).__name__), ERROR)
         finally:
             self.stopped.set()
             self.task = None
 
-    # ── live streaming with reconnection ──────────────────────────────────────
+    def _feed(self):
+        return AudioFeed(self.source, self.stopped, self.capture_factory, self.default_output)
+
+    # ── live streaming ────────────────────────────────────────────────────────
     async def _live(self, key):
+        feed = self._feed()
+        self.pump = asyncio.create_task(self._pump(feed))
         failures = 0
-        dropped_at = None
-        while not self.stopped.is_set():
-            attempt = {'live': False}
-            try:
-                await self._stream(key, attempt, dropped_at)
-                return  # Only returns normally when stopped.
-            except UserError as exc:
-                if exc.fatal:
-                    raise
-                quick = isinstance(exc, ServerEvent) and exc.kind == SESSION_LIMIT
-                reason = str(exc)
-            except (OSError, TimeoutError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
-                quick, reason = False, f'网络中断（{type(exc).__name__}）。'
-            except Exception as exc:  # websockets.ConnectionClosed and friends.
-                quick, reason = False, f'连接中断（{type(exc).__name__}）。'
-            if self.stopped.is_set():
-                return
-            self.mailbox.interrupt()
-            self.mailbox.meter(0.0)
-            if dropped_at is None:
-                dropped_at = time.monotonic()
-            failures = 0 if attempt['live'] else failures + 1
-            if failures >= MAX_FAILED_ATTEMPTS:
-                raise UserError(f'连续 {failures} 次重连失败，已停止。{reason}')
-            delay = 0 if quick else self.retry_delays[min(failures, len(self.retry_delays) - 1)]
-            self.mailbox.state(f'{reason}正在自动重连…', WARN)
-            await asyncio.sleep(delay)
-
-    async def _stream(self, key, attempt, dropped_at):
-        capture = self.capture_factory(self.source, self.stopped)
-        tasks = []
+        reconnecting = False
         try:
-            self.mailbox.state('正在打开音频…' if dropped_at is None else '正在重连…', BUSY)
-            capture.open()
-            if self.stopped.is_set():
-                return
-            if dropped_at is None:
-                self.mailbox.state('正在连接 ElevenLabs…', BUSY)
-            async with self.connector(connection_url(self.source.rate), additional_headers={'xi-api-key': key},
-                                      open_timeout=8, close_timeout=1, ping_interval=10, ping_timeout=8,
-                                      max_size=2**20, max_queue=16, logger=_silent_logger()) as ws:
-                self.connections += 1
+            while not self.stopped.is_set():
+                attempt = {'live': False}
                 try:
-                    ready = asyncio.Event()
-                    tasks.append(asyncio.create_task(self._receive(ws, ready)))
-                    tasks.append(asyncio.create_task(self._send(ws, capture, ready, attempt, dropped_at)))
-                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
-                        task.result()
-                    if not self.stopped.is_set():
-                        raise UserError('连接被服务器关闭。')
-                finally:
-                    await self._halt(tasks, capture)  # Stop sender/receiver before the close handshake.
+                    await self._stream(key, attempt, reconnecting)
+                    return  # Only returns normally when stopped.
+                except UserError as exc:
+                    if exc.fatal:
+                        raise
+                    quick = isinstance(exc, ServerEvent) and exc.kind == SESSION_LIMIT
+                    reason = str(exc)
+                except (OSError, TimeoutError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
+                    quick, reason = False, tr('err.network', name=type(exc).__name__)
+                except Exception as exc:  # websockets.ConnectionClosed and friends.
+                    quick, reason = False, tr('err.link', name=type(exc).__name__)
+                if self.stopped.is_set():
+                    return
+                self._requeue()
+                reconnecting = True
+                failures = 0 if attempt['live'] else failures + 1
+                # Never give up: a network that returns after minutes should simply resume.
+                delay = 0 if quick else self.retry_delays[min(failures, len(self.retry_delays) - 1)]
+                self.link = (WARN, tr('status.retry', reason=reason, n=failures + 1))
+                await asyncio.sleep(delay)
         finally:
-            await self._halt(tasks, capture)  # Also covers failures before the socket opened.
+            self.pump.cancel()
+            await asyncio.gather(self.pump, return_exceptions=True)
+            feed.close()
 
-    async def _halt(self, tasks, capture):
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        tasks.clear()
-        capture.close()
+    def _requeue(self):
+        """Put audio whose words were never committed back at the front of the queue."""
+        self.unsent.extendleft(reversed(self.unconfirmed))
+        self.unconfirmed.clear()
+        self._trim_backlog()
 
-    async def _receive(self, ws, ready):
+    def _trim_backlog(self):
+        while len(self.unsent) > BACKLOG_CHUNKS:
+            self.unsent.popleft()
+            self.lost += 1
+
+    async def _pump(self, feed):
+        """Runs for the whole session, connected or not."""
+        while not self.stopped.is_set():
+            self.unsent.extend(feed.poll())
+            self._trim_backlog()
+            self.mailbox.meter(feed.peak)
+            if feed.switched:
+                self.note = (tr('status.switched', name=feed.switched), time.monotonic() + 6)
+                feed.switched = None
+            self._report(feed)
+            await asyncio.sleep(0.02)
+
+    def _report(self, feed):
+        now = time.monotonic()
+        tone, text = self.link
+        if tone == LIVE:
+            if feed.problem:
+                tone, text = QUIET, tr('status.device_down', reason=feed.problem)
+            elif not feed.heard and now - self.live_since > NEVER_HEARD_AFTER:
+                tone, text = QUIET, tr('status.never_heard')
+            elif feed.silent_seconds > QUIET_AFTER:
+                text = tr('status.live_quiet')
+            else:
+                text = tr('status.live')
+            note, until = self.note
+            if note and now < until:
+                text = f'{text} · {note}'
+        if (tone, text) != self.reported:
+            self.reported = (tone, text)
+            self.mailbox.state(text, tone)
+
+    async def _stream(self, key, attempt, reconnecting):
+        if not reconnecting:
+            self.link = (BUSY, tr('status.connecting'))
+        tasks = []
+        # Pings find a silently dead link within about five seconds.
+        async with self.connector(connection_url(RATE, self.language), additional_headers={'xi-api-key': key},
+                                  open_timeout=8, close_timeout=1, ping_interval=2, ping_timeout=3,
+                                  max_size=2**20, max_queue=16, logger=_silent_logger()) as ws:
+            self.connections += 1
+            try:
+                ready = asyncio.Event()
+                tasks.append(asyncio.create_task(self._receive(ws, ready, key)))
+                tasks.append(asyncio.create_task(self._send(ws, ready, attempt, reconnecting)))
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+                if not self.stopped.is_set():
+                    raise UserError(tr('err.closed'))
+            finally:
+                for task in tasks:  # Stop sender/receiver before the close handshake.
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _receive(self, ws, ready, key):
         async for raw in ws:
             if self.stopped.is_set():
                 return
-            kind, text = decode_event(json.loads(raw))
+            kind, text = decode_event(json.loads(raw), key)
             if kind == 'session_started':
                 ready.set()
             elif kind in ('partial_transcript', 'committed_transcript'):
+                self.fresh = True
                 self.mailbox.transcript(kind, text)
+                # During catch-up the server is still behind what was sent, so keep everything.
+                settled = len(self.unsent) <= 2 and time.monotonic() - self.caught_up_at > 3
+                if kind == 'committed_transcript' and settled:
+                    while len(self.unconfirmed) > KEEP_AFTER_COMMIT:
+                        self.unconfirmed.popleft()
 
-    async def _send(self, ws, capture, ready, attempt, dropped_at):
+    async def _send(self, ws, ready, attempt, reconnecting):
         await asyncio.wait_for(ready.wait(), timeout=8)
         if self.stopped.is_set():
             return
-        capture.start()
         attempt['live'] = True
-        if dropped_at is not None:
-            self.mailbox.gap(time.monotonic() - dropped_at)
-        self.mailbox.state('正在实时转写', LIVE)
-        packetizer = Packetizer(self.source.rate)
+        now = time.monotonic()
+        if self.live_since is None:
+            self.live_since = now
+        self.fresh = False
+        stale_at = now + STALE_PARTIAL_AFTER if reconnecting and self.mailbox.speaking else None
+        announce = reconnecting
+        self.link = (LIVE, '')
         while not self.stopped.is_set():
-            pcm = capture.take()
-            if pcm is None:
+            if self.pump.done() and not self.stopped.is_set():
+                # A dead pump means no audio ever again: stop loudly instead of idling.
+                raise UserError(tr('err.background'), fatal=True)
+            now = time.monotonic()
+            if self.lost:
+                # The backlog overflowed: say so honestly, and do not pretend the sentence is whole.
+                self.mailbox.interrupt()
+                self.mailbox.gap(self.lost * CHUNK_SECONDS)
+                self.lost, stale_at, announce = 0, None, False
+            elif announce:
+                self.note = (tr('status.reconnected'), now + 6)
+                announce = False
+            if stale_at and now > stale_at:
+                if not self.fresh:
+                    self.mailbox.interrupt()
+                stale_at = None
+            if not self.unsent:
                 await asyncio.sleep(0.005)
                 continue
-            for chunk in packetizer.feed(pcm):
-                if self.stopped.is_set():
-                    return
-                await asyncio.wait_for(ws.send(json.dumps(audio_message(chunk, self.source.rate))), timeout=1)
-                self.sent_chunks += 1
-            self.mailbox.meter(capture.peak)
+            backlog = len(self.unsent)
+            chunk = self.unsent.popleft()
+            try:
+                await asyncio.wait_for(ws.send(json.dumps(audio_message(chunk, RATE))), timeout=SEND_TIMEOUT)
+            except BaseException:
+                self.unsent.appendleft(chunk)
+                raise
+            self.unconfirmed.append(chunk)
+            if len(self.unconfirmed) > UNCONFIRMED_CHUNKS:
+                self.unconfirmed.popleft()
+            self.sent_chunks += 1
+            if backlog > 2:
+                self.caught_up_at = time.monotonic()
+                if self.replay_speed:
+                    await asyncio.sleep(CHUNK_SECONDS / self.replay_speed)
 
-    # ── pre-interview self test ───────────────────────────────────────────────
+    # ── self-test ─────────────────────────────────────────────────────────────
     async def _selftest(self, key, seconds=3):
-        capture = self.capture_factory(self.source, self.stopped)
+        feed = self._feed()
         peak = 0.0
         frames = 0
         try:
-            self.mailbox.state(f'自检 1/2：监听扬声器 {seconds} 秒…', BUSY)
-            capture.open()
-            capture.start()
+            self.mailbox.state(tr('test.audio', n=f'{seconds:g}'), BUSY)
             deadline = time.monotonic() + seconds
             while not self.stopped.is_set() and time.monotonic() < deadline:
-                pcm = capture.take()
-                if pcm:
-                    frames += 1
-                    peak = max(peak, capture.peak)
-                    self.mailbox.meter(capture.peak)
-                await asyncio.sleep(0.01)
+                frames += len(feed.poll())
+                peak = max(peak, feed.peak)
+                self.mailbox.meter(feed.peak)
+                await asyncio.sleep(0.02)
+            problem = feed.problem
         finally:
-            capture.close()
+            feed.close()
         self.mailbox.meter(0.0)
         if not frames:
-            raise UserError('自检失败：扬声器没有提供任何音频数据。')
-        audio = '听到了声音' if peak >= 0.001 else '没有声音（此刻没在播放的话属于正常）'
-        self.mailbox.state('自检 2/2：连接 ElevenLabs…', BUSY)
-        async with self.connector(connection_url(self.source.rate), additional_headers={'xi-api-key': key},
+            raise UserError(problem or tr('test.no_frames'))
+        audio = tr('test.heard') if peak >= 0.001 else tr('test.silent')
+        self.mailbox.state(tr('test.api'), BUSY)
+        async with self.connector(connection_url(RATE, self.language), additional_headers={'xi-api-key': key},
                                   open_timeout=8, close_timeout=1, logger=_silent_logger()) as ws:
             started = False
             async with asyncio.timeout(8):
                 async for raw in ws:
-                    if decode_event(json.loads(raw))[0] == 'session_started':
+                    if decode_event(json.loads(raw), key)[0] == 'session_started':
                         started = True
                         break
             if not started:
-                raise UserError('自检失败：服务器没有确认会话。')
-        self.mailbox.state(f'自检通过 · 音频：{audio} · API：密钥有效，连接正常', OK)
+                raise UserError(tr('test.no_session'))
+        self.mailbox.state(tr('test.pass', audio=audio), OK)
+
+
+def _quiet_socket_teardown(loop, context):
+    """Windows' proactor loop reports WinError 10022 when shutting down an already-dead socket."""
+    exc = context.get('exception')
+    if isinstance(exc, OSError) and getattr(exc, 'winerror', None) == 10022:
+        return
+    loop.default_exception_handler(context)
 
 
 def _silent_logger():

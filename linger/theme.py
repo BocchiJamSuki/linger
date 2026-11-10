@@ -44,7 +44,7 @@ class Palette:
     error: str
 
     def tone(self, tone):
-        return {'live': self.live, 'ok': self.ok, 'warn': self.warn, 'error': self.error,
+        return {'live': self.live, 'ok': self.ok, 'warn': self.warn, 'quiet': self.warn, 'error': self.error,
                 'busy': self.accent}.get(tone, self.muted)
 
 
@@ -173,7 +173,7 @@ QToolTip { background: $raised; color: $text; border: 1px solid $border_strong; 
 #appTitle { color: $text; font-size: 14px; font-weight: 600; }
 #statusText { color: $text2; font-size: 12px; }
 #statusText[tone="error"] { color: $error; }
-#statusText[tone="warn"] { color: $warn; }
+#statusText[tone="warn"], #statusText[tone="quiet"] { color: $warn; }
 #statusText[tone="ok"] { color: $ok; }
 #note { color: $muted; font-size: 12px; }
 #note:hover { color: $text2; }
@@ -182,13 +182,13 @@ QToolTip { background: $raised; color: $text; border: 1px solid $border_strong; 
 #pill { background: $raised; border: 1px solid $border; border-radius: 12px; }
 #pill[tone="live"] { background: $live_soft; border-color: $live_border; }
 #pill[tone="ok"] { background: $ok_soft; border-color: $ok_border; }
-#pill[tone="warn"] { background: $warn_soft; border-color: $warn_border; }
+#pill[tone="warn"], #pill[tone="quiet"] { background: $warn_soft; border-color: $warn_border; }
 #pill[tone="error"] { background: $error_soft; border-color: $error_border; }
 #pill[tone="busy"] { background: $accent_soft; border-color: $accent_border; }
 #pillText { color: $text2; font-size: 12px; font-weight: 600; }
 #pillText[tone="live"] { color: $live; }
 #pillText[tone="ok"] { color: $ok; }
-#pillText[tone="warn"] { color: $warn; }
+#pillText[tone="warn"], #pillText[tone="quiet"] { color: $warn; }
 #pillText[tone="error"] { color: $error; }
 #pillText[tone="busy"] { color: $accent; }
 
@@ -256,6 +256,17 @@ QMenu::indicator { width: 14px; height: 14px; left: 8px; }
 QMenu::item:checked { color: $accent; font-weight: 600; }
 QMenu::separator { height: 1px; background: $border; margin: 4px 6px; }
 
+QDialog { background: $surface; }
+#dialogText { color: $text; font-size: 13px; }
+#dialogNote { color: $muted; font-size: 12px; }
+#dialogWarn { color: $warn; font-size: 12px; }
+QLineEdit {
+    background: $raised; color: $text; border: 1px solid $border_strong; border-radius: 8px;
+    padding: 0 10px; min-height: 34px; font-size: 13px; selection-background-color: $selection;
+}
+QLineEdit:focus { border-color: $accent; }
+QPushButton[kind="ghost"] { background: transparent; border: 1px solid transparent; color: $text2; }
+QPushButton[kind="ghost"]:hover { background: $hover; color: $text; }
 QMessageBox { background: $surface; }
 QMessageBox QLabel { color: $text; font-size: 13px; }
 ''')

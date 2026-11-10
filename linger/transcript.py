@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .i18n import tr
+
 FINAL, PROVISIONAL, GAP, RESUME = 'final', 'provisional', 'gap', 'resume'
 SPEECH = (FINAL, PROVISIONAL)
 
@@ -18,9 +20,21 @@ class Segment:
     end: float
 
 
+def _unspaced(char):
+    """Scripts written without spaces between words (Chinese, Japanese kana, Korean)."""
+    code = ord(char)
+    return 0x2E80 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF or 0xFF00 <= code <= 0xFFEF
+
+
 def join_speech(texts):
-    """Segments are pause-delimited fragments of speech: join with spaces, not newlines."""
-    return ' '.join(t.strip() for t in texts if t.strip())
+    """Segments are pause-delimited fragments of one utterance: join into a single line."""
+    out = ''
+    for text in (t.strip() for t in texts):
+        if not text:
+            continue
+        glue = '' if not out or (_unspaced(out[-1]) and _unspaced(text[0])) else ' '
+        out += glue + text
+    return out
 
 
 def recent_group(segments, partial=None, extra=0, gap=GROUP_GAP, limit=GROUP_LIMIT):
@@ -77,7 +91,7 @@ class Recorder:
             if segment.kind == FINAL:
                 line = f'[{clock}] {segment.text}'
             elif segment.kind == PROVISIONAL:
-                line = f'[{clock}] {segment.text}（未确认）'
+                line = f'[{clock}] {segment.text}{tr("unconfirmed")}'
             else:
                 line = f'[{clock}] —— {note} ——'
             with self.path.open('a', encoding='utf-8') as f:

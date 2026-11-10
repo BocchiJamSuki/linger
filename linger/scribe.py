@@ -2,16 +2,23 @@
 import base64
 import os
 from pathlib import Path
+import sys
 from urllib.parse import urlencode
 
+from . import credentials
 from .errors import UserError
+from .i18n import tr
 
 ENDPOINT = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime'
 KEY_NAME = 'ELEVENLABS_API_KEY'
+KEY_PREFIX = 'sk_'
 
 
 def env_dirs():
-    return Path.cwd(), Path(__file__).resolve().parent.parent
+    dirs = [Path.cwd(), Path(__file__).resolve().parent.parent]
+    if getattr(sys, 'frozen', False):  # Packaged build: next to the executable.
+        dirs.insert(0, Path(sys.executable).resolve().parent)
+    return dirs
 
 
 def _from_env_files():
@@ -50,21 +57,34 @@ def _from_registry():
     return ''
 
 
+def find_key():
+    """→ (key, source) with source 'saved' | 'env' | 'file' | None. A key set in the app wins."""
+    for source, lookup in (('saved', credentials.read),
+                           ('env', lambda: os.getenv(KEY_NAME, '').strip() or _from_registry()),
+                           ('file', _from_env_files)):
+        value = lookup().strip()
+        if value:
+            return value, source
+    return '', None
+
+
 def api_key():
-    value = os.getenv(KEY_NAME, '').strip() or _from_registry() or _from_env_files()
+    value, _ = find_key()
     if not value:
-        raise UserError(f'没有找到 {KEY_NAME}。请设置环境变量，或在程序目录的 .env 文件中写入 {KEY_NAME}=…',
-                        fatal=True)
+        raise UserError(tr('err.no_key'), fatal=True)
     return value
 
 
-def connection_url(rate):
-    return ENDPOINT + '?' + urlencode(dict(
-        model_id='scribe_v2_realtime', audio_format=f'pcm_{rate}', language_code='en',
+def connection_url(rate, language='en'):
+    params = dict(
+        model_id='scribe_v2_realtime', audio_format=f'pcm_{rate}',
         commit_strategy='vad', vad_silence_threshold_secs=0.7, vad_threshold=0.4,
         min_speech_duration_ms=100, min_silence_duration_ms=100,
         include_timestamps='false', include_language_detection='false',
-    ))
+    )
+    if language:  # Omitted: the service detects the language.
+        params['language_code'] = language
+    return ENDPOINT + '?' + urlencode(params)
 
 
 def audio_message(pcm, rate):
@@ -74,12 +94,12 @@ def audio_message(pcm, rate):
 
 # Retrying cannot fix these; everything else is treated as transient and reconnected.
 FATAL = {
-    'auth_error': '密钥无效或无权限（auth_error）。请检查 ELEVENLABS_API_KEY。',
-    'quota_exceeded': 'ElevenLabs 额度已用完（quota_exceeded）。',
-    'unaccepted_terms': '需要先在 ElevenLabs 网站接受服务条款（unaccepted_terms）。',
-    'invalid_request': '请求参数被拒绝（invalid_request）。',
-    'input_error': '音频格式被拒绝（input_error）。',
-    'chunk_size_exceeded': '音频分块过大（chunk_size_exceeded）。',
+    'auth_error': 'err.auth',
+    'quota_exceeded': 'err.quota',
+    'unaccepted_terms': 'err.terms',
+    'invalid_request': 'err.request',
+    'input_error': 'err.request',
+    'chunk_size_exceeded': 'err.request',
 }
 TRANSIENT = {
     'error', 'throttled', 'rate_limited', 'queue_overflow', 'resource_exhausted',
@@ -94,17 +114,20 @@ class ServerEvent(UserError):
         self.kind = kind
 
 
-def decode_event(event):
+def decode_event(event, key=''):
     """→ (kind, text). Raises ServerEvent for errors; never echoes server-provided text."""
     kind = event.get('message_type', '')
     if kind in FATAL:
-        raise ServerEvent(kind, FATAL[kind], True)
+        message = FATAL[kind]
+        if kind == 'auth_error' and key and not key.startswith(KEY_PREFIX):
+            message = 'err.auth_id'  # The commonest mistake: pasting the key's ID instead of the key.
+        raise ServerEvent(kind, tr(message, kind=kind), True)
     if kind in TRANSIENT or kind.endswith('_error') or 'error' in event:
         known = kind if kind in TRANSIENT else 'server_error'
-        raise ServerEvent(known, f'ElevenLabs 返回 {known}。', False)
+        raise ServerEvent(known, tr('err.transient', kind=known), False)
     if kind in ('partial_transcript', 'committed_transcript'):
         text = event.get('text', '')
         if not isinstance(text, str):
-            raise UserError('收到无效的字幕消息。')
+            raise UserError(tr('err.bad_message'))
         return kind, text
     return kind, ''
