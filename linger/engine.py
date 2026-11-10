@@ -27,10 +27,11 @@ IDLE, BUSY, LIVE, OK, WARN, ERROR, QUIET = 'idle', 'busy', 'live', 'ok', 'warn',
 COMMIT, PROVISIONAL, GAP = 'commit', 'provisional', 'gap'
 
 RETRY_DELAYS = (0.3, 1, 2, 3, 5)
-BACKLOG_CHUNKS = 200       # 20 s of audio may wait for the network; beyond that the oldest is lost.
+BACKLOG_CHUNKS = 600       # 60 s of audio may wait for the network; beyond that the oldest is lost.
 UNCONFIRMED_CHUNKS = 300   # Audio kept for replay: sent, but its words are not committed yet.
 KEEP_AFTER_COMMIT = 7      # A commit follows 0.7 s of silence, so older audio is fully transcribed.
-REPLAY_SPEED = 4.0         # Catch-up pace as a multiple of real time (None: as fast as possible).
+REPLAY_SPEED = 8.0         # Catch-up pace as a multiple of real time. Measured against the service:
+                           # 16x is accepted, unthrottled sending is cut off with queue_overflow.
 NEVER_HEARD_AFTER = 10     # Seconds of live silence from the start before pointing at the routing.
 QUIET_AFTER = 5
 STALE_PARTIAL_AFTER = 8    # If a reconnect brings no new words, keep the old ones as unconfirmed.
@@ -180,6 +181,8 @@ class Engine(threading.Thread):
                         raise
                     quick = isinstance(exc, ServerEvent) and exc.kind == SESSION_LIMIT
                     reason = str(exc)
+                    if isinstance(exc, ServerEvent) and exc.kind == 'queue_overflow':
+                        self.replay_speed = max(2.0, (self.replay_speed or 2 * REPLAY_SPEED) / 2)  # Sent too fast.
                 except (OSError, TimeoutError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
                     quick, reason = False, tr('err.network', name=type(exc).__name__)
                 except Exception as exc:  # websockets.ConnectionClosed and friends.

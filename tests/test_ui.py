@@ -289,3 +289,15 @@ def test_key_dialog_warns_about_key_ids_and_saves_to_the_store(qtbot, monkeypatc
     second.field.setText('sk_abc')
     second.save()
     assert written[-1] == 'sk_abc' and second.outcome
+
+
+def test_source_list_opens_as_a_menu_and_selects(make_window):
+    w = make_window()
+    w.show()
+    w.source.showPopup()
+    actions = w.source.menu.actions()
+    assert [a.text() for a in actions] == ['Default speaker', 'Other speaker']
+    assert actions[0].isChecked() and not actions[1].isChecked()
+    actions[1].trigger()
+    assert w.source.currentData().uid == 'b' and w.settings.value('source') == 'b'
+    w.source.hidePopup()

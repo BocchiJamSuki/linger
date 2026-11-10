@@ -172,6 +172,30 @@ def test_keeps_retrying_while_the_network_is_down(fake_capture):
     asyncio.run(scenario())
 
 
+def test_sending_too_fast_slows_the_replay_down(fake_capture):
+    # Measured against the real service: unthrottled catch-up ends the session with queue_overflow.
+    async def scenario():
+        sessions = []
+
+        async def handler(ws):
+            sessions.append(1)
+            await ws.send(json.dumps({'message_type': 'session_started'}))
+            if len(sessions) == 1:
+                await ws.send(json.dumps({'message_type': 'queue_overflow', 'error': 'too frequent'}))
+            async for _ in ws:
+                pass
+
+        async with serve(handler, '127.0.0.1', 0) as server:
+            m = Mailbox()
+            e = make(m, fake_capture, connector=local(server.sockets[0].getsockname()[1]), replay_speed=8.0)
+            task = asyncio.create_task(e._main())
+            await until(lambda: len(sessions) == 2)
+            assert e.replay_speed == 4.0
+            e.stop()
+            await asyncio.wait_for(task, 3)
+    asyncio.run(scenario())
+
+
 def test_stop_during_handshake_releases_everything(fake_capture):
     async def scenario():
         entered = asyncio.Event()

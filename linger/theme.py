@@ -230,13 +230,6 @@ QComboBox#source:hover { background: $hover; color: $text; }
 QComboBox#source:disabled { color: $muted; }
 QComboBox#source::drop-down { border: none; width: 22px; subcontrol-origin: padding; subcontrol-position: center right; }
 QComboBox#source::down-arrow { image: url("$chevron"); width: 10px; height: 10px; }
-QComboBox QAbstractItemView {
-    background: $raised; color: $text; border: 1px solid $border_strong; border-radius: 10px; padding: 4px;
-    selection-background-color: $accent_soft; selection-color: $text; outline: none;
-}
-QComboBox QAbstractItemView::item { min-height: 30px; padding: 0 10px; border-radius: 6px; border: none; }
-QComboBox QAbstractItemView::item:selected, QComboBox QAbstractItemView::item:hover { background: $accent_soft; color: $text; }
-QComboBoxPrivateContainer { background: transparent; border: none; padding: 0; margin: 0; }
 
 QTextEdit#transcript { background: $bg; border: none; color: $text;
     selection-background-color: $selection; selection-color: $text; }
@@ -254,6 +247,9 @@ QMenu::item:selected { background: $hover; }
 QMenu::item:disabled { color: $muted; }
 QMenu::indicator { width: 14px; height: 14px; left: 8px; }
 QMenu::item:checked { color: $accent; font-weight: 600; }
+QMenu#sources::item { padding: 8px 18px 8px 10px; }
+QMenu#sources::item:checked { background: $accent_soft; color: $text; font-weight: 400; }
+QMenu#sources::icon { padding-left: 8px; }
 QMenu::separator { height: 1px; background: $border; margin: 4px 6px; }
 
 QDialog { background: $surface; }
@@ -287,6 +283,13 @@ def stylesheet(c):
         error_soft=rgba(c.error, soft), error_border=rgba(c.error, 0.40),
         **values,
     )
+
+
+def round_menu(menu):
+    """Give a popup menu a transparent window, so its rounded corners have no square backing."""
+    menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+    menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    return menu
 
 
 def tint_title_bar(widget, c):

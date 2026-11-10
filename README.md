@@ -107,7 +107,7 @@ The system-wide hotkey can be changed to <kbd>Alt</kbd>+<kbd>`</kbd>, <kbd>F8</k
 
 ## Reliability
 
-- **Audio and network are independent.** Audio is captured continuously for the whole session. While the connection is down it is held in a 20-second buffer; once the connection returns, the buffered audio is sent first, together with any audio whose words had not yet been finalized. A drop in the middle of a sentence is therefore normally invisible in the transcript.
+- **Audio and network are independent.** Audio is captured continuously for the whole session. While the connection is down it is held in a 60-second buffer; once the connection returns, the buffered audio is sent first, together with any audio whose words had not yet been finalized. A drop in the middle of a sentence is therefore normally invisible in the transcript.
 - **Honest about loss.** If an outage outlasts the buffer, the transcript states how many seconds of audio could not be transcribed, and the words that were in progress are kept and marked as unconfirmed.
 - **Persistent reconnection.** A dead connection is detected within about five seconds, and Linger keeps retrying for as long as the session runs. A session stops by itself only on errors that retrying cannot resolve, such as an invalid key or an exhausted quota.
 - **Self-healing capture.** If the audio device fails or is removed, capture restarts on its own without interrupting the connection.

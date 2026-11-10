@@ -423,7 +423,7 @@ class TranscriptView(QTextEdit):
     def contextMenuEvent(self, event):
         self.menu_open = True
         try:
-            menu = QMenu(self)
+            menu = theme.round_menu(QMenu(self))
             copy = menu.addAction(tr('copy'))
             copy.setShortcut(QKeySequence.StandardKey.Copy)
             copy.setEnabled(bool(self.selected_text()))

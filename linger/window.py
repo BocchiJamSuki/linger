@@ -7,7 +7,7 @@ from PySide6.QtCore import QPoint, QSettings, QSize, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton,
-    QSizePolicy, QStyledItemDelegate, QVBoxLayout, QWidget,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from . import hotkey, i18n, theme
@@ -34,15 +34,33 @@ def records_folder():
 
 
 class SourceBox(QComboBox):
-    """Re-scans output devices every time it opens, so a newly plugged device just appears."""
+    """Device chooser. Opens as a menu of our own: the stock combo popup cannot have clean
+    rounded corners. Devices are re-scanned on every open, so a newly plugged one just appears.
+    """
 
     def __init__(self, refresh):
         super().__init__()
         self.refresh = refresh
+        self.menu = None
 
     def showPopup(self):
         self.refresh()
-        super().showPopup()
+        menu = self.menu = theme.round_menu(QMenu(self))
+        menu.setObjectName('sources')
+        for index in range(self.count()):
+            action = menu.addAction(self.itemIcon(index), self.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.currentIndex())
+            action.setEnabled(self.itemData(index) is not None)
+            action.triggered.connect(lambda _=False, i=index: self.setCurrentIndex(i))
+        menu.setMinimumWidth(self.width())
+        menu.aboutToHide.connect(self.hidePopup)
+        menu.popup(self.mapToGlobal(self.rect().bottomLeft()) + QPoint(0, 4))
+
+    def hidePopup(self):
+        if self.menu is not None and self.menu.isVisible():
+            self.menu.hide()
+        super().hidePopup()
 
 
 class Window(QMainWindow):
@@ -114,13 +132,6 @@ class Window(QMainWindow):
         self.source.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.source.setMaximumWidth(360)
         self.source.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.source.setItemDelegate(QStyledItemDelegate(self.source))  # Honours QSS ::item rules.
-        popup = self.source.view().window()  # Translucent so rounded corners have no square backing.
-        popup.setWindowFlags(popup.windowFlags() | Qt.WindowType.FramelessWindowHint
-                             | Qt.WindowType.NoDropShadowWindowHint)
-        popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        if isinstance(popup, QFrame):
-            popup.setFrameShape(QFrame.Shape.NoFrame)
         self.source.currentIndexChanged.connect(self._source_chosen)
         bar.addWidget(self.source)
         bar.addStretch(1)
@@ -188,7 +199,7 @@ class Window(QMainWindow):
 
     def _choices(self, menu, title, options, current, chosen):
         """A submenu of mutually exclusive options: [(value, label)]."""
-        sub = menu.addMenu(title)
+        sub = theme.round_menu(menu.addMenu(title))
         group = QActionGroup(sub)
         for value, label in options:
             action = QAction(label, sub, checkable=True)
@@ -199,7 +210,7 @@ class Window(QMainWindow):
         return sub
 
     def _build_menu(self):
-        menu = QMenu(self)
+        menu = theme.round_menu(QMenu(self))
         menu.addAction(tr('menu.font_up'), lambda: self.step_font(1)).setShortcut(QKeySequence('Ctrl+='))
         menu.addAction(tr('menu.font_down'), lambda: self.step_font(-1)).setShortcut(QKeySequence('Ctrl+-'))
         menu.addSeparator()
