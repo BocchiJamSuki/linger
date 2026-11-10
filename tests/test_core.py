@@ -54,6 +54,9 @@ def test_protocol_parameters_and_payload():
     assert url.scheme == 'wss' and url.netloc == 'api.elevenlabs.io'
     assert q['model_id'] == ['scribe_v2_realtime'] and q['language_code'] == ['en']
     assert q['commit_strategy'] == ['vad'] and q['audio_format'] == ['pcm_16000']
+    assert q['include_timestamps'] == ['true']  # Word timings bound the audio each commit covers.
+    assert scribe.committed_until({'words': [{'end': 1.2}, {'end': 2.12}, {'text': '?'}]}) == 2.12
+    assert scribe.committed_until({'words': []}) is None and scribe.committed_until({}) is None
     assert parse_qs(urlparse(connection_url(16000, 'ja')).query)['language_code'] == ['ja']
     assert 'language_code' not in parse_qs(urlparse(connection_url(16000, None)).query)  # Auto-detect.
     msg = audio_message(b'\x00\x01' * 1600, 16000)

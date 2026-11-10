@@ -18,7 +18,8 @@ from websockets.asyncio.client import connect
 from .audio import CHUNK_SECONDS, RATE, AudioFeed, LoopbackCapture, default_output
 from .errors import UserError
 from .i18n import tr
-from .scribe import SESSION_LIMIT, ServerEvent, api_key, audio_message, connection_url, decode_event
+from .scribe import SESSION_LIMIT, TIMED_COMMIT, ServerEvent, api_key, audio_message, committed_until
+from .scribe import connection_url, decode_event
 
 # Status tones drive the UI's colour language. QUIET: connected, but no audio is arriving.
 IDLE, BUSY, LIVE, OK, WARN, ERROR, QUIET = 'idle', 'busy', 'live', 'ok', 'warn', 'error', 'quiet'
@@ -29,7 +30,7 @@ COMMIT, PROVISIONAL, GAP = 'commit', 'provisional', 'gap'
 RETRY_DELAYS = (0.3, 1, 2, 3, 5)
 BACKLOG_CHUNKS = 600       # 60 s of audio may wait for the network; beyond that the oldest is lost.
 UNCONFIRMED_CHUNKS = 300   # Audio kept for replay: sent, but its words are not committed yet.
-KEEP_AFTER_COMMIT = 7      # A commit follows 0.7 s of silence, so older audio is fully transcribed.
+PLAIN_COMMIT_GRACE = 1.0   # How long to wait for a commit's timed twin before using the plain one.
 REPLAY_SPEED = 8.0         # Catch-up pace as a multiple of real time. Measured against the service:
                            # 16x is accepted, unthrottled sending is cut off with queue_overflow.
 NEVER_HEARD_AFTER = 10     # Seconds of live silence from the start before pointing at the routing.
@@ -115,7 +116,8 @@ class Engine(threading.Thread):
         self.note = ('', 0.0)        # Short-lived remark appended to the live status.
         self.reported = None
         self.live_since = None
-        self.caught_up_at = 0.0
+        self.session_sent = 0        # Chunks sent on the current connection (its audio clock).
+        self.plain_commit = None     # (text, timer) while waiting for the timed twin.
         self.fresh = False           # Any transcript event on the current connection.
         self.sent_chunks = 0
         self.connections = 0
@@ -267,20 +269,53 @@ class Engine(threading.Thread):
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _receive(self, ws, ready, key):
-        async for raw in ws:
-            if self.stopped.is_set():
-                return
-            kind, text = decode_event(json.loads(raw), key)
-            if kind == 'session_started':
-                ready.set()
-            elif kind in ('partial_transcript', 'committed_transcript'):
-                self.fresh = True
-                self.mailbox.transcript(kind, text)
-                # During catch-up the server is still behind what was sent, so keep everything.
-                settled = len(self.unsent) <= 2 and time.monotonic() - self.caught_up_at > 3
-                if kind == 'committed_transcript' and settled:
-                    while len(self.unconfirmed) > KEEP_AFTER_COMMIT:
-                        self.unconfirmed.popleft()
+        try:
+            async for raw in ws:
+                if self.stopped.is_set():
+                    return
+                event = json.loads(raw)
+                kind, text = decode_event(event, key)
+                if kind == 'session_started':
+                    ready.set()
+                elif kind == 'partial_transcript':
+                    self.fresh = True
+                    self.mailbox.transcript(kind, text)
+                elif kind == TIMED_COMMIT:
+                    # Text and its exact audio extent arrive together: show the words and stop
+                    # keeping their audio for replay in one step, so a drop can neither lose
+                    # nor repeat them.
+                    self._drop_plain_commit()
+                    self.fresh = True
+                    self.mailbox.transcript('committed_transcript', text)
+                    self._confirm_until(committed_until(event))
+                elif kind == 'committed_transcript':
+                    # The same commit without timings arrives first. Use it only if its timed
+                    # twin never shows up.
+                    self._drop_plain_commit()
+                    timer = self.loop.call_later(PLAIN_COMMIT_GRACE, self._use_plain_commit)
+                    self.plain_commit = (text, timer)
+        finally:
+            self._drop_plain_commit()
+
+    def _drop_plain_commit(self):
+        if self.plain_commit:
+            self.plain_commit[1].cancel()
+            self.plain_commit = None
+
+    def _use_plain_commit(self):
+        if self.plain_commit:
+            text, _ = self.plain_commit
+            self.plain_commit = None
+            self.fresh = True
+            self.mailbox.transcript('committed_transcript', text)
+
+    def _confirm_until(self, seconds):
+        """Forget replay audio up to `seconds` on this connection's audio clock."""
+        if seconds is None:
+            return
+        first = self.session_sent - len(self.unconfirmed)   # Clock index of the oldest kept chunk.
+        for _ in range(min(len(self.unconfirmed), int(seconds / CHUNK_SECONDS) - first)):
+            self.unconfirmed.popleft()
 
     async def _send(self, ws, ready, attempt, reconnecting):
         await asyncio.wait_for(ready.wait(), timeout=8)
@@ -291,6 +326,7 @@ class Engine(threading.Thread):
         if self.live_since is None:
             self.live_since = now
         self.fresh = False
+        self.session_sent = 0
         stale_at = now + STALE_PARTIAL_AFTER if reconnecting and self.mailbox.speaking else None
         announce = reconnecting
         self.link = (LIVE, '')
@@ -325,10 +361,9 @@ class Engine(threading.Thread):
             if len(self.unconfirmed) > UNCONFIRMED_CHUNKS:
                 self.unconfirmed.popleft()
             self.sent_chunks += 1
-            if backlog > 2:
-                self.caught_up_at = time.monotonic()
-                if self.replay_speed:
-                    await asyncio.sleep(CHUNK_SECONDS / self.replay_speed)
+            self.session_sent += 1
+            if backlog > 2 and self.replay_speed:
+                await asyncio.sleep(CHUNK_SECONDS / self.replay_speed)  # Catching up: pace the replay.
 
     # ── self-test ─────────────────────────────────────────────────────────────
     async def _selftest(self, key, seconds=3):

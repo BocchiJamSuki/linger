@@ -80,7 +80,8 @@ def connection_url(rate, language='en'):
         model_id='scribe_v2_realtime', audio_format=f'pcm_{rate}',
         commit_strategy='vad', vad_silence_threshold_secs=0.7, vad_threshold=0.4,
         min_speech_duration_ms=100, min_silence_duration_ms=100,
-        include_timestamps='false', include_language_detection='false',
+        # Word timings tell exactly how much audio each commit covers (see Engine._receive).
+        include_timestamps='true', include_language_detection='false',
     )
     if language:  # Omitted: the service detects the language.
         params['language_code'] = language
@@ -106,12 +107,19 @@ TRANSIENT = {
     'session_time_limit_exceeded', 'insufficient_audio_activity', 'transcriber_error',
 }
 SESSION_LIMIT = 'session_time_limit_exceeded'
+TIMED_COMMIT = 'committed_transcript_with_timestamps'
 
 
 class ServerEvent(UserError):
     def __init__(self, kind, message, fatal):
         super().__init__(message, fatal=fatal)
         self.kind = kind
+
+
+def committed_until(event):
+    """Seconds of this session's audio that a timed commit covers: the end of its last word."""
+    ends = [w.get('end') for w in event.get('words') or [] if isinstance(w, dict)]
+    return max((e for e in ends if isinstance(e, (int, float))), default=None)
 
 
 def decode_event(event, key=''):
@@ -125,7 +133,7 @@ def decode_event(event, key=''):
     if kind in TRANSIENT or kind.endswith('_error') or 'error' in event:
         known = kind if kind in TRANSIENT else 'server_error'
         raise ServerEvent(known, tr('err.transient', kind=known), False)
-    if kind in ('partial_transcript', 'committed_transcript'):
+    if kind in ('partial_transcript', 'committed_transcript', TIMED_COMMIT):
         text = event.get('text', '')
         if not isinstance(text, str):
             raise UserError(tr('err.bad_message'))

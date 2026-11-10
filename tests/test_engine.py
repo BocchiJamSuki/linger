@@ -40,6 +40,13 @@ async def until(predicate, timeout=4):
             await asyncio.sleep(0.005)
 
 
+async def commit(ws, text, until):
+    """What the real service sends: the plain commit, then its twin with word timings."""
+    await ws.send(json.dumps({'message_type': 'committed_transcript', 'text': text}))
+    await ws.send(json.dumps({'message_type': 'committed_transcript_with_timestamps', 'text': text,
+                              'words': [{'text': text, 'start': max(0, until - 1), 'end': until}]}))
+
+
 def collect(mailbox, events, statuses=None):
     snap = mailbox.drain()
     events.extend(snap.events)
@@ -66,7 +73,7 @@ def test_drop_mid_sentence_is_replayed_and_loses_nothing(fake_capture):
             async for _ in ws:
                 received[2] += 1
                 if received[2] == 5:
-                    await ws.send(json.dumps({'message_type': 'committed_transcript', 'text': 'Half a sentence, whole.'}))
+                    await commit(ws, 'Half a sentence, whole.', 0.5)
 
         async with serve(handler, '127.0.0.1', 0) as server:
             m = Mailbox()
@@ -84,6 +91,57 @@ def test_drop_mid_sentence_is_replayed_and_loses_nothing(fake_capture):
             await asyncio.wait_for(task, 3)
             assert all(c.closed for c in fake_capture.instances)
             assert len(fake_capture.instances) == 1  # Audio capture survived the reconnect untouched.
+    asyncio.run(scenario())
+
+
+def test_committed_audio_is_never_replayed(fake_capture):
+    # Found against the real service: a sentence committed early in a session was transcribed
+    # a second time after a reconnect, because its audio was still queued for replay.
+    async def scenario():
+        received = []
+
+        async def handler(ws):
+            await ws.send(json.dumps({'message_type': 'session_started'}))
+            async for _ in ws:
+                received.append(1)
+                if len(received) == 30:
+                    await commit(ws, 'Three seconds of speech.', 3.0)
+
+        async with serve(handler, '127.0.0.1', 0) as server:
+            m = Mailbox()
+            e = make(m, fake_capture, connector=local(server.sockets[0].getsockname()[1]))
+            task = asyncio.create_task(e._main())
+            events = []
+            await until(lambda: collect(m, events))
+            assert events == [(COMMIT, 'Three seconds of speech.')]  # Once, although two events carried it.
+            # Everything up to second 3.0 on the session clock (30 chunks) is gone from the replay queue.
+            assert e.session_sent - len(e.unconfirmed) >= 30
+            e._requeue()
+            assert len(e.unsent) <= e.session_sent - 30 + 5
+            e.stop()
+            await asyncio.wait_for(task, 3)
+    asyncio.run(scenario())
+
+
+def test_plain_commit_is_used_when_no_timings_follow(fake_capture, monkeypatch):
+    monkeypatch.setattr(engine_module, 'PLAIN_COMMIT_GRACE', 0.05)
+
+    async def scenario():
+        async def handler(ws):
+            await ws.send(json.dumps({'message_type': 'session_started'}))
+            await ws.send(json.dumps({'message_type': 'committed_transcript', 'text': 'No timings for this one.'}))
+            async for _ in ws:
+                pass
+
+        async with serve(handler, '127.0.0.1', 0) as server:
+            m = Mailbox()
+            e = make(m, fake_capture, connector=local(server.sockets[0].getsockname()[1]))
+            task = asyncio.create_task(e._main())
+            events = []
+            await until(lambda: collect(m, events))
+            assert events == [(COMMIT, 'No timings for this one.')]
+            e.stop()
+            await asyncio.wait_for(task, 3)
     asyncio.run(scenario())
 
 

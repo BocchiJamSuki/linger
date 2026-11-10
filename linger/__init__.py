@@ -5,7 +5,7 @@ Importing never starts capture or networking.
 import os
 import sys
 
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 # Preload System32's ICU before Qt, so Anaconda or other DLLs on PATH cannot break PySide6.
 if sys.platform == 'win32':
